@@ -168,7 +168,17 @@ impl SmtpHandler {
                     return Some(true);
                 }
 
-                self.body.push(line.to_string());
+                let line_to_push = if line.starts_with(".") {
+                    // Section 4.5.2 of RFC 5321 states that lines starting with a dot
+                    // should have the dot removed when they are part of the message body.
+                    // This is to avoid confusion with the end of data marker.
+                    // So we push the line without the leading dot.
+                    line[1..].to_string()
+                } else {
+                    line.to_string()
+                };
+
+                self.body.push(line_to_push);
             }
         }
 

@@ -1,5 +1,7 @@
+use email_address::EmailAddress;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -17,8 +19,8 @@ enum SmtpState {
 }
 
 struct SmtpHandler {
-    from: String,
-    to: String,
+    from: EmailAddress,
+    to: EmailAddress,
     body: Vec<String>,
     write_stream: OwnedWriteHalf,
     state: SmtpState,
@@ -27,8 +29,8 @@ struct SmtpHandler {
 impl SmtpHandler {
     fn new(write_stream: OwnedWriteHalf) -> Self {
         SmtpHandler {
-            from: String::new(),
-            to: String::new(),
+            from: EmailAddress::new_unchecked(""),
+            to: EmailAddress::new_unchecked(""),
             body: Vec::new(),
             write_stream,
             state: SmtpState::Start,
@@ -108,7 +110,24 @@ impl SmtpHandler {
                     return Some(false);
                 }
                 if line[..10].to_uppercase() == "MAIL FROM:" {
-                    self.from = line[10..].trim().to_string();
+                    let from = line[10..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .strip_prefix('<')
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or("")
+                        .to_string();
+
+                    match EmailAddress::from_str(&from) {
+                        Ok(email) => self.from = email,
+                        Err(_) => {
+                            self.write("501 Syntax error in parameters or arguments\r\n")
+                                .await;
+                            return Some(false);
+                        }
+                    }
+
                     if !self.write("250 OK\r\n").await {
                         return Some(false);
                     }
@@ -125,7 +144,23 @@ impl SmtpHandler {
                     return Some(false);
                 }
                 if line[..8].to_uppercase() == "RCPT TO:" {
-                    self.to = line[8..].trim().to_string();
+                    let to = line[8..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .strip_prefix('<')
+                        .and_then(|s| s.strip_suffix('>'))
+                        .unwrap_or("")
+                        .to_string();
+                    match EmailAddress::from_str(&to) {
+                        Ok(email) => self.to = email,
+                        Err(_) => {
+                            self.write("501 Syntax error in parameters or arguments\r\n")
+                                .await;
+                            return Some(false);
+                        }
+                    }
+
                     if !self.write("250 OK\r\n").await {
                         return Some(false);
                     }
@@ -168,12 +203,12 @@ impl SmtpHandler {
                     return Some(true);
                 }
 
-                let line_to_push = if line.starts_with(".") {
+                let line_to_push = if let Some(line) = line.strip_prefix(".") {
                     // Section 4.5.2 of RFC 5321 states that lines starting with a dot
                     // should have the dot removed when they are part of the message body.
                     // This is to avoid confusion with the end of data marker.
                     // So we push the line without the leading dot.
-                    line[1..].to_string()
+                    line.to_string()
                 } else {
                     line.to_string()
                 };

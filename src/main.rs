@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -177,7 +179,7 @@ impl SmtpHandler {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:2522").await?;
-    let active_connections = Arc::new(RwLock::new(Vec::<JoinHandle<()>>::new()));
+    let active_connections = Arc::new(RwLock::new(HashMap::<SocketAddr, JoinHandle<()>>::new()));
 
     println!("Listening on {}", listener.local_addr()?);
     println!("Press Ctrl+C to stop the server");
@@ -192,12 +194,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (read_stream, write_stream) = socket.into_split();
                     let handler = SmtpHandler::new(write_stream);
 
+                    let active_connections_clone_clone = active_connections_clone.clone();
                     let handle = tokio::spawn(async move {
                         handler.handle(read_stream).await;
                         println!("Connection from {addr} closed");
+                        active_connections_clone_clone.write().await.remove(&addr);
                     });
 
-                    active_connections_clone.write().await.push(handle);
+                    active_connections_clone.write().await.insert(addr, handle);
                 }
                 Err(e) => {
                     eprintln!("Failed to accept connection: {e}");
@@ -212,7 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     accept_task.abort();
 
     let mut connections = active_connections.write().await;
-    for handle in connections.iter_mut() {
+    for handle in connections.values_mut() {
         handle
             .await
             .map_err(|e| eprintln!("Error joining task: {e:?}"))

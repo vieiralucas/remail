@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres
+    environment:
+      POSTGRES_DB: remail
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: remail
+      POSTGRES_PASSWORD: remail
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+
+volumes:
+  postgres_data:

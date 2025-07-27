@@ -1,4 +1,5 @@
 use email_address::EmailAddress;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -10,6 +11,74 @@ use tokio::signal;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
+#[derive(Debug, Serialize)]
+struct NewEmail {
+    from: EmailAddress,
+    to: EmailAddress,
+    subject: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl NewEmail {
+    fn from_raw_message(from: EmailAddress, to: EmailAddress, body_lines: Vec<String>) -> Self {
+        let mut headers = Vec::new();
+        let mut body = String::new();
+        let mut parsing_headers = true;
+        for line in body_lines {
+            if parsing_headers {
+                if line.is_empty() {
+                    parsing_headers = false;
+                    continue;
+                }
+
+                if let Some((key, value)) = line.split_once(':') {
+                    headers.push((key.trim().to_string(), value.trim().to_string()));
+                } else {
+                    // If the line doesn't contain a colon, treat it as a continuation of the previous header
+                    if let Some(last_header) = headers.last_mut() {
+                        last_header.1.push_str(&format!("\n{line}"));
+                    } else {
+                        // If there are no headers yet, just push the line as a header
+                        headers.push((line.to_string(), String::new()));
+                    }
+                }
+            } else {
+                body.push_str(&line);
+                body.push('\n');
+            }
+        }
+
+        let subject = headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("Subject"))
+            .map_or(String::new(), |(_, value)| value.clone());
+
+        Self {
+            from,
+            to,
+            subject,
+            headers,
+            body,
+        }
+    }
+
+    async fn save(&self, db: &sqlx::Pool<sqlx::Postgres>) -> Result<(), sqlx::Error> {
+        let headers = serde_json::to_value(&self.headers).expect("Failed to serialize headers");
+        sqlx::query!(
+            r#"INSERT INTO emails ("from", "to", subject, headers, body) VALUES ($1, $2, $3, $4, $5)"#,
+            self.from.to_string(),
+            self.to.to_string(),
+            self.subject,
+            headers,
+            self.body
+        )
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+}
+
 enum SmtpState {
     Start,
     MailFrom,
@@ -19,6 +88,8 @@ enum SmtpState {
 }
 
 struct SmtpHandler {
+    db: sqlx::Pool<sqlx::Postgres>,
+
     from: EmailAddress,
     to: EmailAddress,
     body: Vec<String>,
@@ -27,8 +98,10 @@ struct SmtpHandler {
 }
 
 impl SmtpHandler {
-    fn new(write_stream: OwnedWriteHalf) -> Self {
-        SmtpHandler {
+    fn new(write_stream: OwnedWriteHalf, db: sqlx::Pool<sqlx::Postgres>) -> Self {
+        Self {
+            db,
+
             from: EmailAddress::new_unchecked(""),
             to: EmailAddress::new_unchecked(""),
             body: Vec::new(),
@@ -188,11 +261,19 @@ impl SmtpHandler {
             }
             SmtpState::End => {
                 if line == "." {
-                    // TODO: actually store the email in inbox
-                    println!(
-                        "Received email from: {}, to: {}, body: {:?}",
-                        self.from, self.to, self.body
+                    let email = NewEmail::from_raw_message(
+                        self.from.clone(),
+                        self.to.clone(),
+                        self.body.clone(),
                     );
+                    if let Err(e) = email.save(&self.db).await {
+                        eprintln!("Error saving email: {e}");
+                        if !self.write("550 Internal server error\r\n").await {
+                            return Some(false);
+                        }
+                        return Some(false);
+                    }
+
                     if !self
                         .write("250 OK: Message accepted for delivery\r\n")
                         .await
@@ -223,6 +304,14 @@ impl SmtpHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    sqlx::migrate!("./migrations");
+
+    let pg_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await?;
+
     let listener = TcpListener::bind("127.0.0.1:2522").await?;
     let active_connections = Arc::new(RwLock::new(HashMap::<SocketAddr, JoinHandle<()>>::new()));
 
@@ -237,7 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok((socket, addr)) => {
                     println!("Accepted connection from {addr}");
                     let (read_stream, write_stream) = socket.into_split();
-                    let handler = SmtpHandler::new(write_stream);
+                    let handler = SmtpHandler::new(write_stream, pg_pool.clone());
 
                     let active_connections_clone_clone = active_connections_clone.clone();
                     let handle = tokio::spawn(async move {

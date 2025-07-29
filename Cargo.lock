@@ -943,7 +943,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remail"
+name = "remail-server"
 version = "0.1.0"
 dependencies = [
  "email_address",

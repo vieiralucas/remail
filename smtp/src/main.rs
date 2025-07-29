@@ -64,17 +64,38 @@ impl NewEmail {
     }
 
     async fn save(&self, db: &sqlx::Pool<sqlx::Postgres>) -> Result<(), sqlx::Error> {
-        let headers = serde_json::to_value(&self.headers).expect("Failed to serialize headers");
-        sqlx::query!(
-            r#"INSERT INTO emails ("from", "to", subject, headers, body) VALUES ($1, $2, $3, $4, $5)"#,
+        let mut tx = db.begin().await?;
+
+        let email_id = sqlx::query!(
+            r#"INSERT INTO emails ("from", "to", subject, body) VALUES ($1, $2, $3, $4) RETURNING id"#,
             self.from.to_string(),
             self.to.to_string(),
             self.subject,
-            headers,
             self.body
         )
-        .execute(db)
-        .await?;
+        .fetch_one(&mut *tx)
+        .await?
+        .id;
+
+        if !self.headers.is_empty() {
+            let mut query =
+                String::from("INSERT INTO email_headers (email_id, key, value) VALUES ");
+
+            for (i, _) in self.headers.iter().enumerate() {
+                if i > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!("(${}, ${}, ${})", i * 3 + 1, i * 3 + 2, i * 3 + 3));
+            }
+
+            let mut query_builder = sqlx::query(&query);
+            for (key, value) in &self.headers {
+                query_builder = query_builder.bind(email_id).bind(key).bind(value);
+            }
+            query_builder.execute(&mut *tx).await?;
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -312,7 +333,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&db_url)
         .await?;
 
-    let listener = TcpListener::bind("127.0.0.1:2522").await?;
+    let port: u16 = std::env::var("SMTP_PORT")
+        .unwrap_or_else(|_| "2525".to_string())
+        .parse()
+        .expect("SMTP_PORT must be a valid u16");
+
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     let active_connections = Arc::new(RwLock::new(HashMap::<SocketAddr, JoinHandle<()>>::new()));
 
     println!("Listening on {}", listener.local_addr()?);

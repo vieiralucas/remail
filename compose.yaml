@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres
+    image: postgres:17
     environment:
       POSTGRES_DB: remail
       POSTGRES_PORT: 5432
@@ -9,7 +9,59 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - '5432:5432'
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remail -d remail"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      DATABASE_URL: postgres://remail:remail@db:5432/remail
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    command: cargo watch -x 'run -p remail-api' -w .
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    command: sh -c "cd ui && dx serve --port 8080"
+
+  smtp:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      DATABASE_URL: postgres://remail:remail@db:5432/remail
+      SMTP_PORT: 2525
+    ports:
+      - "2525:2525"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    command: cargo watch -x 'run -p remail-smtp' -w .
 
 volumes:
   postgres_data:

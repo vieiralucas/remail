@@ -1,0 +1,30 @@
+FROM rust:1.88-slim
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cargo install cargo-watch dioxus-cli
+
+WORKDIR /app
+
+# Copy workspace Cargo files first for better layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY api/Cargo.toml ./api/
+COPY smtp/Cargo.toml ./smtp/
+COPY ui/Cargo.toml ./ui/
+COPY types/Cargo.toml ./types/
+
+RUN mkdir -p api/src smtp/src ui/src types/src && \
+    echo "fn main() {}" > api/src/main.rs && \
+    echo "fn main() {}" > smtp/src/main.rs && \
+    echo "fn main() {}" > ui/src/main.rs && \
+    echo "pub fn dummy() {}" > types/src/lib.rs
+
+RUN cargo build --workspace
+
+RUN rm -rf api/src smtp/src ui/src types/src
+
+# Default command (will be overridden in compose.yaml)
+CMD ["sleep", "infinity"]

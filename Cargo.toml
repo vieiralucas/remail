@@ -1,5 +1,5 @@
 [workspace]
-members = ["api", "smtp", "ui"]
+members = ["api", "smtp", "ui", "types"]
 resolver = "2"
 
 [profile]

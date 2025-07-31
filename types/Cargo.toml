@@ -1,0 +1,9 @@
+[package]
+name = "remail-types"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.17.0", features = ["v4", "serde", "js"] } 

@@ -338,10 +338,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .expect("SMTP_PORT must be a valid u16");
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    let listener = TcpListener::bind(format!("localhost:{port}")).await?;
     let active_connections = Arc::new(RwLock::new(HashMap::<SocketAddr, JoinHandle<()>>::new()));
 
-    println!("Listening on {}", listener.local_addr()?);
+    println!("Listening on localhost:{port}");
     println!("Press Ctrl+C to stop the server");
 
     let active_connections_clone = active_connections.clone();

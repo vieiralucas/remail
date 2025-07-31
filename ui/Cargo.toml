@@ -6,6 +6,11 @@ edition = "2024"
 
 [dependencies]
 dioxus = { version = "0.6.0", features = ["router"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.141"
+chrono = { version = "0.4", features = ["serde"] }
+remail-types = { path = "../types" }
 
 [features]
 default = ["web"]

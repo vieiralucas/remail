@@ -1,18 +1,7 @@
 use axum::{Json, Router, extract::State, response::IntoResponse};
-use chrono::{DateTime, Utc};
+use remail_types::Email;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use uuid::Uuid;
-
-#[derive(Debug, serde::Serialize)]
-struct Email {
-    id: Uuid,
-    from: String,
-    to: String,
-    subject: Option<String>,
-    headers: Vec<(String, String)>,
-    body: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
 
 async fn list_emails(db: &sqlx::Pool<sqlx::Postgres>) -> Result<Vec<Email>, sqlx::Error> {
     let emails = sqlx::query!(
@@ -62,12 +51,12 @@ async fn list_emails(db: &sqlx::Pool<sqlx::Postgres>) -> Result<Vec<Email>, sqlx
             subject: email.subject,
             headers: headers_by_email.remove(&email.id).unwrap_or_default(),
             body: email.body,
-            created_at: DateTime::from_timestamp(
+            created_at: chrono::DateTime::from_timestamp(
                 email.created_at.unix_timestamp(),
                 email.created_at.nanosecond(),
             )
             .unwrap_or_default(),
-            updated_at: DateTime::from_timestamp(
+            updated_at: chrono::DateTime::from_timestamp(
                 email.updated_at.unix_timestamp(),
                 email.updated_at.nanosecond(),
             )
@@ -88,6 +77,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&db_url)
         .await?;
 
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _request_head| {
+            let origin_str = origin.to_str().unwrap_or("");
+            origin_str.starts_with("http://localhost:")
+        }))
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/readyz", axum::routing::get(|| async { "OK" }))
         .route("/livez", axum::routing::get(|| async { "OK" }))
@@ -107,6 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }),
         )
+        .layer(cors)
         .with_state(pg_pool);
 
     let port: u16 = std::env::var("PORT")
@@ -114,11 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .expect("PORT must be a valid u16");
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .expect("Failed to bind TCP listener");
 
-    println!("Listening on http://127.0.0.1:{port}");
+    println!("Listening on http://0.0.0.0:{port}");
     axum::serve(listener, app)
         .await
         .expect("Failed to start server");

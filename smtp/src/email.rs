@@ -1,7 +1,7 @@
 use email_address::EmailAddress;
 use serde::Serialize;
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct NewEmail {
     pub from: EmailAddress,
     pub to: EmailAddress,
@@ -35,7 +35,7 @@ impl NewEmail {
                 }
             } else {
                 body.push_str(&line);
-                body.push('\n');
+                body.push_str("\r\n");
             }
         }
 

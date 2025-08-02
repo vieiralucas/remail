@@ -233,16 +233,50 @@ mod tests {
     use crate::email::NewEmail;
     use crate::persistor::SmtpPersistor;
 
-    #[derive(Default)]
-    struct MockSmtpPersistor {}
+    struct MockSmtpPersistor {
+        expected: NewEmail,
+    }
+
+    impl MockSmtpPersistor {
+        fn new(expected: NewEmail) -> Self {
+            Self { expected }
+        }
+    }
+
     impl SmtpPersistor for MockSmtpPersistor {
-        async fn persist_email(&self, _email: &NewEmail) -> Result<(), sqlx::Error> {
+        async fn persist_email(&self, email: &NewEmail) -> Result<(), sqlx::Error> {
+            assert_eq!(self.expected, *email);
             Ok(())
         }
     }
 
     #[tokio::test]
-    async fn test_smtp_handler() {
-        let mut _mock_persistor = MockSmtpPersistor::default();
+    async fn test_smtp_handler_simple_case() {
+        let expected = NewEmail {
+            from: EmailAddress::new_unchecked("sender@example.com".to_string()),
+            to: EmailAddress::new_unchecked("recipient@example.com".to_string()),
+            subject: "Test Email".to_string(),
+            headers: vec![("Subject".to_string(), "Test Email".to_string())],
+            body: "Hello, world!\r\n".to_string(),
+        };
+        let mock_persistor = MockSmtpPersistor::new(expected);
+        let discard_stream = tokio::io::sink();
+        let handler = SmtpHandler::new(discard_stream, mock_persistor);
+
+        let message = vec![
+            "HELO example.com\r\n".as_bytes(),
+            "MAIL FROM: <sender@example.com>\r\n".as_bytes(),
+            "RCPT TO: <recipient@example.com>\r\n".as_bytes(),
+            "DATA\r\n".as_bytes(),
+            "Subject: Test Email\r\n".as_bytes(),
+            "\r\n".as_bytes(),
+            "Hello, world!\r\n".as_bytes(),
+            ".\r\n".as_bytes(),
+        ]
+        .concat();
+
+        let read_stream = std::io::Cursor::new(message);
+
+        let _ = handler.handle(read_stream).await;
     }
 }

@@ -4034,6 +4034,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "remail-smtp"
+version = "0.1.0"
+dependencies = [
+ "email_address",
+]
+
+[[package]]
 name = "remail-types"
 version = "0.1.0"
 dependencies = [

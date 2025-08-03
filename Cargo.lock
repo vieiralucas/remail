@@ -4022,7 +4022,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remail-smtp"
+name = "remail-maild"
 version = "0.1.0"
 dependencies = [
  "email_address",

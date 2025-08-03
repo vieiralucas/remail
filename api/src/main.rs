@@ -70,7 +70,7 @@ async fn list_emails(db: &sqlx::Pool<sqlx::Postgres>) -> Result<Vec<Email>, sqlx
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    sqlx::migrate!("../smtp/migrations");
+    sqlx::migrate!("../maild/migrations");
 
     let pg_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)

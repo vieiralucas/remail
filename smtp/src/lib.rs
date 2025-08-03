@@ -7,7 +7,7 @@ pub struct Message {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageParserEvent {
-    From(EmailAddress),
+    From(Option<EmailAddress>),
     To(EmailAddress),
     Header(String, String),
     Body(Vec<String>),
@@ -28,7 +28,7 @@ pub struct MessageParser<R: std::io::Read> {
     lines: Lines<BufReader<R>>,
     state: MessageParserState,
 
-    from: EmailAddress,
+    from: Option<EmailAddress>,
     to: EmailAddress,
     body: Vec<String>,
 }
@@ -40,7 +40,7 @@ impl<R: std::io::Read> MessageParser<R> {
         Self {
             lines,
             state: MessageParserState::Start,
-            from: EmailAddress::new_unchecked(""),
+            from: None,
             to: EmailAddress::new_unchecked(""),
             body: Vec::new(),
         }
@@ -91,16 +91,20 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                                 .unwrap_or("")
                                 .to_string();
 
+                            if from == "" {
+                                self.from = None;
+                                self.state = MessageParserState::MailFrom;
+                                return Some(Ok(MessageParserEvent::From(None)));
+                            }
+
                             match EmailAddress::from_str(&from) {
                                 Ok(email) => {
-                                    self.from = email.clone();
+                                    self.from = Some(email.clone());
                                     self.state = MessageParserState::MailFrom;
-                                    Some(Ok(MessageParserEvent::From(email)))
+                                    Some(Ok(MessageParserEvent::From(Some(email))))
                                 }
                                 Err(err) => {
-                                    Some(Err(MessageParserError::InvalidFromEmailAddress(
-                                        err,
-                                    )))
+                                    Some(Err(MessageParserError::InvalidFromEmailAddress(err)))
                                 }
                             }
                         } else {
@@ -133,9 +137,7 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                                     Some(Ok(MessageParserEvent::To(email)))
                                 }
                                 Err(err) => {
-                                    Some(Err(MessageParserError::InvalidToEmailAddress(
-                                        err,
-                                    )))
+                                    Some(Err(MessageParserError::InvalidToEmailAddress(err)))
                                 }
                             }
                         } else {
@@ -207,8 +209,8 @@ mod tests {
     ) {
         match actual {
             Some(Ok(event)) => assert_eq!(expected, event),
-            Some(Err(err)) => assert!(false, "Unexpected error: {:?}", err),
-            None => assert!(false, "Unexpected end of input"),
+            Some(Err(err)) => assert!(false, "Expected {:?} but got error: {:?}", expected, err),
+            None => assert_eq!(Some(expected), None),
         }
     }
 
@@ -218,7 +220,7 @@ mod tests {
         let mut parser = MessageParser::new(input.as_bytes());
 
         assert_event(
-            MessageParserEvent::From(EmailAddress::new_unchecked("test@example.com")),
+            MessageParserEvent::From(Some(EmailAddress::new_unchecked("test@example.com"))),
             parser.next(),
         );
         assert_event(
@@ -230,5 +232,35 @@ mod tests {
             parser.next(),
         );
         assert_event(MessageParserEvent::Done(Message {}), parser.next());
+    }
+
+    #[test]
+    fn test_mail_from() {
+        let table = vec![
+            (
+                "MAIL FROM: <test@example.com>",
+                Some(EmailAddress::new_unchecked("test@example.com")),
+            ),
+            (
+                "MAIL FROM:<test@example.com>",
+                Some(EmailAddress::new_unchecked("test@example.com")),
+            ),
+            ("MAIL FROM: <>", None),
+            ("MAIL FROM:<>", None),
+            (
+                "MAIL FROM: <test+tag@example.com>",
+                Some(EmailAddress::new_unchecked("test+tag@example.com")),
+            ),
+            (
+                "MAIL FROM: <test@example.com> param1=ignored",
+                Some(EmailAddress::new_unchecked("test@example.com")),
+            ),
+        ];
+
+        for (input, expected) in table {
+            let input = vec!["HELO example.com", input].join("\r\n");
+            let actual = MessageParser::new(input.as_bytes()).next();
+            assert_event(MessageParserEvent::From(expected), actual);
+        }
     }
 }

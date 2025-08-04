@@ -84,7 +84,8 @@ pub enum MessageParserState {
     Helo,
     MailFrom,
     RcptTo,
-    Data,
+    Headers,
+    Body,
     End,
     Done,
 }
@@ -95,6 +96,9 @@ pub struct MessageParser<R: std::io::Read> {
 
     from: Option<EmailAddress>,
     to: NonEmptyVec<EmailAddress>,
+    // TODO: refactor a headers parse out of here
+    current_header: Option<(String, NonEmptyVec<String>)>,
+    headers: Vec<(String, String)>,
     body: Vec<String>,
 }
 
@@ -107,6 +111,8 @@ impl<R: std::io::Read> MessageParser<R> {
             state: MessageParserState::Start,
             from: None,
             to: NonEmptyVec::new(EmailAddress::new_unchecked("")),
+            current_header: None,
+            headers: Vec::new(),
             body: Vec::new(),
         }
     }
@@ -119,7 +125,8 @@ pub enum MessageParserError {
     InvalidFromEmailAddress(email_address::Error),
     InvalidToEmailAddress(email_address::Error),
     UnexpectedEnd,
-    UnexpectedDataAfterEnd,
+    UnexpectedDataAfterEnd(String),
+    InvalidHeader(String),
 }
 
 fn parse_rcpt_to(line: &str) -> Result<EmailAddress, email_address::Error> {
@@ -218,7 +225,7 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                     }
                     MessageParserState::RcptTo => {
                         if line.to_uppercase() == "DATA" {
-                            self.state = MessageParserState::Data;
+                            self.state = MessageParserState::Headers;
                             self.next()
                         } else if line.starts_with("RCPT TO:") {
                             match parse_rcpt_to(&line) {
@@ -238,7 +245,62 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                             Some(Err(MessageParserError::UnrecognizedCommand(line)))
                         }
                     }
-                    MessageParserState::Data => {
+                    // TODO: we should have a headers parse
+                    MessageParserState::Headers => {
+                        if line.is_empty() {
+                            if let Some((name, value)) = &self.current_header {
+                                self.headers
+                                    .push((name.clone(), value.clone().into_vec().join(" ")));
+                                self.current_header = None;
+                            }
+                            self.state = MessageParserState::Body;
+                            self.next()
+                        } else if line.starts_with(" ") || line.starts_with("\t") {
+                            if let Some((_, value)) = &mut self.current_header {
+                                let part = line
+                                    .strip_prefix(" ")
+                                    .unwrap_or_default()
+                                    .strip_prefix("\t")
+                                    .unwrap_or_default()
+                                    .to_string();
+                                value.push(part);
+                                self.next()
+                            } else {
+                                Some(Err(MessageParserError::InvalidHeader(line)))
+                            }
+                        } else {
+                            let parsed_header = self
+                                .current_header
+                                .as_ref()
+                                .map(|(name, value)| (name, value.clone().into_vec().join(" ")));
+                            if let Some((name, value)) = parsed_header {
+                                self.headers.push((name.clone(), value.clone()));
+                                self.current_header = None;
+                            }
+
+                            match line.split_once(":") {
+                                Some((name, rest)) => {
+                                    self.current_header = Some((
+                                        name.to_string(),
+                                        NonEmptyVec::new(rest.to_string()),
+                                    ));
+                                    self.next()
+                                }
+                                None => {
+                                    let mut raw_header = String::new();
+                                    if let Some((name, value)) = &self.current_header {
+                                        raw_header.push_str(name);
+                                        for part in value.iter() {
+                                            raw_header.push_str(&format!(" {part}"));
+                                        }
+                                    }
+                                    raw_header.push_str(&line);
+                                    Some(Err(MessageParserError::InvalidHeader(raw_header.clone())))
+                                }
+                            }
+                        }
+                    }
+                    MessageParserState::Body => {
                         if line == "." {
                             self.state = MessageParserState::End;
                             return Some(Ok(MessageParserEvent::Body(self.body.clone())));
@@ -258,10 +320,10 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                         self.next()
                     }
                     MessageParserState::End => {
-                        Some(Err(MessageParserError::UnexpectedDataAfterEnd))
+                        Some(Err(MessageParserError::UnexpectedDataAfterEnd(line)))
                     }
                     MessageParserState::Done => {
-                        Some(Err(MessageParserError::UnexpectedDataAfterEnd))
+                        Some(Err(MessageParserError::UnexpectedDataAfterEnd(line)))
                     }
                 }
             }
@@ -271,7 +333,8 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                 MessageParserState::Helo => Some(Err(MessageParserError::UnexpectedEnd)),
                 MessageParserState::MailFrom => Some(Err(MessageParserError::UnexpectedEnd)),
                 MessageParserState::RcptTo => Some(Err(MessageParserError::UnexpectedEnd)),
-                MessageParserState::Data => Some(Err(MessageParserError::UnexpectedEnd)),
+                MessageParserState::Headers => Some(Err(MessageParserError::UnexpectedEnd)),
+                MessageParserState::Body => Some(Err(MessageParserError::UnexpectedEnd)),
                 MessageParserState::End => Some(Ok(MessageParserEvent::Done(Message {}))),
                 MessageParserState::Done => None,
             },
@@ -387,6 +450,86 @@ mod tests {
             }
 
             assert_eq!(expected, parser.to);
+        }
+    }
+
+    #[test]
+    fn test_headers() {
+        let table = vec![
+            (
+                "Subject: Test\r\n",
+                vec![("Subject".to_string(), "Test".to_string())],
+            ),
+            (
+                "Subject:Test\r\n",
+                vec![("Subject".to_string(), "Test".to_string())],
+            ),
+            (
+                "Subject:Test \r\n",
+                vec![("Subject".to_string(), "Test ".to_string())],
+            ),
+            (
+                "Subject: Test\r\nCc: john@example.com\r\n",
+                vec![
+                    ("Subject".to_string(), "Test".to_string()),
+                    ("Cc".to_string(), "john@example.com".to_string()),
+                ],
+            ),
+            (
+                // leading space
+                "Subject:  Test\r\n",
+                vec![("Subject".to_string(), " Test".to_string())],
+            ),
+            (
+                // folded multi line headers with empty first line
+                "Subject:\r\n Test\r\n",
+                vec![("Subject".to_string(), " Test".to_string())],
+            ),
+            (
+                // folded multi line headers with leading space first line
+                "Subject: \r\n Test\r\n",
+                vec![("Subject".to_string(), " Test".to_string())],
+            ),
+            (
+                // folded multi line headers with non empty first line
+                "Subject: First\r\n Second\r\n",
+                vec![("Subject".to_string(), "First Second".to_string())],
+            ),
+            (
+                // folded multi line headers with empty lines in between line
+                "Subject: First\r\n \r\n Second\r\n",
+                vec![("Subject".to_string(), "First  Second".to_string())],
+            ),
+        ];
+
+        for (input, expected) in table {
+            let input = vec![
+                "HELO example.com",
+                "MAIL FROM: <>",
+                "RCPT TO: <jane@example.com>",
+                "DATA",
+                input,
+            ]
+            .join("\r\n");
+
+            dbg!(input.clone());
+
+            let mut parser = MessageParser::new(input.as_bytes());
+
+            // skip mail from
+            parser.next();
+            // skip rcpt to
+            parser.next();
+
+            for i in 0..(expected.len()) {
+                let actual = parser.next();
+                assert_event(
+                    MessageParserEvent::Header(expected[i].0.clone(), expected[i].1.clone()),
+                    actual,
+                );
+            }
+
+            assert_eq!(expected, parser.headers);
         }
     }
 }

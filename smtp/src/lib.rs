@@ -1,6 +1,71 @@
 use email_address::EmailAddress;
 use std::io::{BufRead, BufReader, Lines};
+use std::ops::{Index, IndexMut};
 use std::str::FromStr;
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct NonEmptyVec<T> {
+    pub head: T,
+    tail: Vec<T>,
+}
+
+impl<T> NonEmptyVec<T> {
+    pub fn new(head: T) -> Self {
+        Self {
+            head,
+            tail: Vec::new(),
+        }
+    }
+
+    pub fn with_tail(head: T, tail: Vec<T>) -> Self {
+        Self { head, tail }
+    }
+
+    pub fn len(&self) -> usize {
+        1 + self.tail.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    pub fn push(&mut self, value: T) {
+        self.tail.push(value);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        std::iter::once(&self.head).chain(self.tail.iter())
+    }
+
+    pub fn into_vec(self) -> Vec<T> {
+        let mut v = Vec::with_capacity(1 + self.tail.len());
+        v.push(self.head);
+        v.extend(self.tail);
+        v
+    }
+}
+
+impl<T> Index<usize> for NonEmptyVec<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        if index == 0 {
+            &self.head
+        } else {
+            &self.tail[index - 1]
+        }
+    }
+}
+
+impl<T> IndexMut<usize> for NonEmptyVec<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        if index == 0 {
+            &mut self.head
+        } else {
+            &mut self.tail[index - 1]
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {}
@@ -29,7 +94,7 @@ pub struct MessageParser<R: std::io::Read> {
     state: MessageParserState,
 
     from: Option<EmailAddress>,
-    to: EmailAddress,
+    to: NonEmptyVec<EmailAddress>,
     body: Vec<String>,
 }
 
@@ -41,7 +106,7 @@ impl<R: std::io::Read> MessageParser<R> {
             lines,
             state: MessageParserState::Start,
             from: None,
-            to: EmailAddress::new_unchecked(""),
+            to: NonEmptyVec::new(EmailAddress::new_unchecked("")),
             body: Vec::new(),
         }
     }
@@ -55,6 +120,18 @@ pub enum MessageParserError {
     InvalidToEmailAddress(email_address::Error),
     UnexpectedEnd,
     UnexpectedDataAfterEnd,
+}
+
+fn parse_rcpt_to(line: &str) -> Result<EmailAddress, email_address::Error> {
+    let to = line[8..]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or("")
+        .to_string();
+    EmailAddress::from_str(&to)
 }
 
 impl<R: std::io::Read> Iterator for MessageParser<R> {
@@ -91,7 +168,7 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                                 .unwrap_or("")
                                 .to_string();
 
-                            if from == "" {
+                            if from.is_empty() {
                                 self.from = None;
                                 self.state = MessageParserState::MailFrom;
                                 return Some(Ok(MessageParserEvent::From(None)));
@@ -122,17 +199,9 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                             return Some(Err(MessageParserError::UnrecognizedCommand(line)));
                         }
                         if line[..8].to_uppercase() == "RCPT TO:" {
-                            let to = line[8..]
-                                .split_whitespace()
-                                .next()
-                                .unwrap_or("")
-                                .strip_prefix('<')
-                                .and_then(|s| s.strip_suffix('>'))
-                                .unwrap_or("")
-                                .to_string();
-                            match EmailAddress::from_str(&to) {
+                            match parse_rcpt_to(&line) {
                                 Ok(email) => {
-                                    self.to = email.clone();
+                                    self.to[0] = email.clone();
                                     self.state = MessageParserState::RcptTo;
                                     Some(Ok(MessageParserEvent::To(email)))
                                 }
@@ -151,6 +220,17 @@ impl<R: std::io::Read> Iterator for MessageParser<R> {
                         if line.to_uppercase() == "DATA" {
                             self.state = MessageParserState::Data;
                             self.next()
+                        } else if line.starts_with("RCPT TO:") {
+                            match parse_rcpt_to(&line) {
+                                Ok(email) => {
+                                    self.to.push(email.clone());
+                                    self.state = MessageParserState::RcptTo;
+                                    Some(Ok(MessageParserEvent::To(email)))
+                                }
+                                Err(err) => {
+                                    Some(Err(MessageParserError::InvalidToEmailAddress(err)))
+                                }
+                            }
                         } else {
                             // TODO: we should actually check if this is a command that exists
                             // to return a BadSequenceOfCommands Error instead of always returning
@@ -259,8 +339,54 @@ mod tests {
 
         for (input, expected) in table {
             let input = vec!["HELO example.com", input].join("\r\n");
-            let actual = MessageParser::new(input.as_bytes()).next();
-            assert_event(MessageParserEvent::From(expected), actual);
+            let mut parser = MessageParser::new(input.as_bytes());
+            let actual = parser.next();
+            assert_event(MessageParserEvent::From(expected.clone()), actual);
+            assert_eq!(expected, parser.from);
+        }
+    }
+
+    #[test]
+    fn test_rcpt_to() {
+        let table = vec![
+            (
+                "RCPT TO: <test@example.com>",
+                NonEmptyVec::new(EmailAddress::new_unchecked("test@example.com")),
+            ),
+            (
+                "RCPT TO:<test@example.com>",
+                NonEmptyVec::new(EmailAddress::new_unchecked("test@example.com")),
+            ),
+            (
+                "RCPT TO: <test+tag@example.com>",
+                NonEmptyVec::new(EmailAddress::new_unchecked("test+tag@example.com")),
+            ),
+            (
+                "RCPT TO: <test@example.com> param1=ignored",
+                NonEmptyVec::new(EmailAddress::new_unchecked("test@example.com")),
+            ),
+            (
+                "RCPT TO: <test@example.com>\r\nRCPT TO: <test2@example.com>",
+                NonEmptyVec::with_tail(
+                    EmailAddress::new_unchecked("test@example.com"),
+                    vec![EmailAddress::new_unchecked("test2@example.com")],
+                ),
+            ),
+        ];
+
+        for (input, expected) in table {
+            let input = vec!["HELO example.com", "MAIL FROM:<>", input].join("\r\n");
+
+            let mut parser = MessageParser::new(input.as_bytes());
+            // skip mail from
+            parser.next();
+
+            for i in 0..(expected.len()) {
+                let actual = parser.next();
+                assert_event(MessageParserEvent::To(expected[i].clone()), actual);
+            }
+
+            assert_eq!(expected, parser.to);
         }
     }
 }
